@@ -3,21 +3,21 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
 
-module Data.URI where
-
-import Data.URI.Auth (URIAuth, parseURIAuth, printURIAuth)
+module Data.URI.ByteString where
 
 import Control.Applicative (optional, (<|>))
 import Control.Monad (void, when)
-import Data.Attoparsec.Text (Parser, char, sepBy, string, takeWhile, takeWhile1, (<?>))
-import Data.Char (isControl, isSpace)
+import Data.Attoparsec.ByteString (Parser, sepBy, string, takeWhile, takeWhile1, (<?>))
+import Data.Attoparsec.ByteString.Char8 (char)
+import Data.ByteString (ByteString)
+import qualified Data.ByteString as BS
+import Data.ByteString.Internal (c2w)
 import Data.Data (Typeable)
 import Data.Strict.Maybe (Maybe (..), maybe)
 import Data.Strict.Tuple (Pair (..))
-import Data.Text (Text)
-import qualified Data.Text as T
 import Data.Vector (Vector)
 import qualified Data.Vector as V
+import Data.Word8 (isControl, isSpace)
 import GHC.Generics (Generic)
 import Test.QuickCheck (Arbitrary (..))
 import Test.QuickCheck.Gen (elements, listOf, listOf1, oneof)
@@ -26,17 +26,16 @@ import Prelude hiding (Maybe (..), maybe, takeWhile)
 import qualified Prelude as P
 
 data URI = URI
-  { uriScheme :: !(Maybe Text)
+  { uriScheme :: !(Maybe ByteString)
   -- ^ the scheme without the colon - @https://hackage.haskell.org/@ has a scheme of @https@
   , uriSlashes :: !Bool
   -- ^ are the slashes present? - @https://hackage.haskell.org/@ is @True@
-  , uriAuthority :: !URIAuth
-  , uriPath :: !(Maybe (Vector Text))
+  , uriPath :: !(Maybe (Vector ByteString))
   -- ^ slash-separated list - @https://hackage.haskell.org/foo@ is @["foo"]@
-  , uriQuery :: !(Vector (Pair Text (Maybe Text)))
+  , uriQuery :: !(Vector (Pair ByteString (Maybe ByteString)))
   -- ^ list of key-value pairs - @https://hackage.haskell.org/?foo=bar&baz&qux=@ is
   -- @[("foo", Just "bar"), ("baz", Nothing), ("qux", Just "")]@
-  , uriFragment :: !(Maybe Text)
+  , uriFragment :: !(Maybe ByteString)
   -- ^ uri suffix - @https://hackage.haskell.org/#some-header@ is @Just "some-header"@
   }
   deriving (Show, Eq, Typeable, Generic)
@@ -46,37 +45,35 @@ instance Arbitrary URI where
     URI
       <$> arbitraryScheme
       <*> arbitrary
-      <*> arbitrary
       <*> arbitraryPath
       <*> arbitraryQuery
       <*> arbitraryScheme
    where
-    arbitraryScheme = oneof [pure Nothing, Just <$> arbitraryNonEmptyText]
-    arbitraryNonEmptyText = T.pack <$> listOf1 (elements ['a' .. 'z'])
+    arbitraryScheme = oneof [pure Nothing, Just <$> arbitraryNonEmptyBS]
+    arbitraryNonEmptyBS = BS.pack <$> listOf1 (elements (map c2w ['a' .. 'z']))
     arbitraryPath =
-      oneof [pure Nothing, Just . V.fromList <$> listOf1 arbitraryNonEmptyText]
+      oneof [pure Nothing, Just . V.fromList <$> listOf1 arbitraryNonEmptyBS]
     arbitraryQuery =
       V.fromList <$> listOf go
      where
       go = do
-        a <- arbitraryNonEmptyText
-        mb <- oneof [pure Nothing, Just <$> arbitraryNonEmptyText]
+        a <- arbitraryNonEmptyBS
+        mb <- oneof [pure Nothing, Just <$> arbitraryNonEmptyBS]
         pure (a :!: mb)
 
-printURI :: URI -> Text
+printURI :: URI -> ByteString
 printURI URI{..} =
   maybe "" (<> ":") uriScheme
     <> (if uriSlashes then "//" else "")
-    <> printURIAuth uriAuthority
     <> ( case uriPath of
-          Just xs -> "/" <> T.intercalate "/" (V.toList xs)
+          Just xs -> "/" <> BS.intercalate "/" (V.toList xs)
           Nothing -> ""
        )
     <> ( if null uriQuery
           then ""
           else
             "?"
-              <> T.intercalate
+              <> BS.intercalate
                 "&"
                 ( V.toList $
                     ( \(k :!: mV) ->
@@ -97,14 +94,13 @@ parseURI =
   URI
     <$> (toStrictMaybe <$> optional parseScheme)
     <*> parseSlashes
-    <*> parseURIAuth
     <*> parsePath
     <*> parseQuery
     <*> (toStrictMaybe <$> optional parseFragment)
  where
-  parseScheme :: Parser Text
+  parseScheme :: Parser ByteString
   parseScheme = do
-    sch <- takeWhile1 (\c -> c `notElem` [':', '/', '@', '.', '[', '*']) <?> "scheme value"
+    sch <- takeWhile1 (\c -> c `notElem` (map c2w [':', '/', '@', '.', '[', '*'])) <?> "scheme value"
     when (sch == "localhost") (fail "can't be localhost")
     void (char ':') <?> "scheme colon"
     pure sch
@@ -114,14 +110,14 @@ parseURI =
     case mS of
       P.Nothing -> pure False
       P.Just _ -> pure True
-  parsePath :: Parser (Maybe (Vector Text))
+  parsePath :: Parser (Maybe (Vector ByteString))
   parsePath =
     let withRoot = do
           void (char '/') <?> "root"
           (Just . V.fromList <$> parseChunkWithout ['/', '?', '=', '&', '#'] `sepBy` char '/') <?> "path"
         withoutRoot = pure Nothing <?> "empty path"
      in withRoot <|> withoutRoot
-  parseQuery :: Parser (Vector (Pair Text (Maybe Text)))
+  parseQuery :: Parser (Vector (Pair ByteString (Maybe ByteString)))
   parseQuery =
     ( do
         void (char '?') <?> "uri query init"
@@ -138,13 +134,13 @@ parseURI =
         pure (V.fromList qs)
     )
       <|> pure V.empty
-  parseFragment :: Parser Text
+  parseFragment :: Parser ByteString
   parseFragment = do
     void (char '#') <?> "fragment init"
     parseChunkWithout [] <?> "fragment value"
-  parseChunkWithout :: [Char] -> Parser Text
+  parseChunkWithout :: [Char] -> Parser ByteString
   parseChunkWithout xs =
-    takeWhile (\c -> not (isControl c || isSpace c) && c `notElem` xs)
+    takeWhile (\c -> not (isControl c || isSpace c) && c `notElem` (map c2w xs))
 
   toStrictMaybe P.Nothing = Nothing
   toStrictMaybe (P.Just x) = Just x
